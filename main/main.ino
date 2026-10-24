@@ -557,12 +557,28 @@ void drawReading() {
         float barValues[5] = {bookProgress, bookProgress, bookProgress,
                               bookProgress, batteryLevel};
 
+        // The battery bar (4) is shortened to make room for its
+        // "Battery : xx%" label on the left (small font, 6x8 px per char).
+        const int battLabelW = 90;   // fits "Battery : 100%" (14 chars * 6 px) + gap
+
         for (int i = 0; i < 5; i++) {
             float v = constrain(barValues[i], 0.0f, 1.0f);
             // Battery bar turns red when it drops to 20% or below
             uint32_t color = (i == 4 && v <= 0.2f) ? TFT_RED : t.accent;
-            canvas.drawRect(barX, barY[i], barW, barH, color);
-            canvas.fillRect(barX, barY[i], (int)(v * barW), barH, color);
+            int x = barX, w = barW;
+            if (i == 4) {
+                char label[20];
+                snprintf(label, sizeof(label), "Battery : %d%%", (int)(v * 100.0f + 0.5f));
+                canvas.setTextSize(1);
+                canvas.setTextColor(color, t.bg);
+                canvas.setCursor(barX, barY[i] - 1);   // 8 px text centred on the 6 px bar
+                canvas.print(label);
+                canvas.setTextSize(2);                 // restore the word font size
+                x = barX + battLabelW;
+                w = barW - battLabelW;
+            }
+            canvas.drawRect(x, barY[i], w, barH, color);
+            canvas.fillRect(x, barY[i], (int)(v * w), barH, color);
         }
     }
 
