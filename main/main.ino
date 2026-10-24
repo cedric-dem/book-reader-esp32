@@ -510,6 +510,21 @@ unsigned long calculateWordDelay(std::string word) {
     return (unsigned long)(baseDelay * lengthFactor * punctFactor / currentSpeedMult);
 }
 
+// Battery level in percent (0-100). The reading is cached and only refreshed
+// every 5 seconds so the bar doesn't flicker from ADC noise and we don't poll
+// the hardware on every frame.
+int readBatteryLevel() {
+    static int cached = -1;
+    static unsigned long lastRead = 0;
+    if (cached < 0 || millis() - lastRead > 5000) {
+        int lvl = M5.Power.getBatteryLevel();
+        if (lvl >= 0) cached = constrain(lvl, 0, 100);
+        else if (cached < 0) cached = 0;
+        lastRead = millis();
+    }
+    return cached;
+}
+
 void drawReading() {
     Theme t = themes[currentThemeIndex];
     canvas.fillScreen(t.bg);
@@ -531,19 +546,23 @@ void drawReading() {
     // Draw Status / Progress Bars (if Focus Mode is off)
     if (!focusMode) {
         // 5 progress bars: 3 above the word, 2 below it.
-        // Each one currently shows book progress; change the matching entry
-        // in barValues (0.0 to 1.0) to make a bar track something else.
+        // Bars 0-3 show book progress; the bottom bar (4) is the battery level.
+        // Change the matching entry in barValues (0.0 to 1.0) to make a bar
+        // track something else.
         const int barX = 10, barW = 220, barH = 6;
         const int barY[5] = {5, 17, 29,   // above the word (word sits at y=60..76)
                              112, 124};   // below the word
         float bookProgress = (float)currentWordIndex / total;
+        float batteryLevel = readBatteryLevel() / 100.0f;
         float barValues[5] = {bookProgress, bookProgress, bookProgress,
-                              bookProgress, bookProgress};
+                              bookProgress, batteryLevel};
 
         for (int i = 0; i < 5; i++) {
             float v = constrain(barValues[i], 0.0f, 1.0f);
-            canvas.drawRect(barX, barY[i], barW, barH, t.accent);
-            canvas.fillRect(barX, barY[i], (int)(v * barW), barH, t.accent);
+            // Battery bar turns red when it drops to 20% or below
+            uint32_t color = (i == 4 && v <= 0.2f) ? TFT_RED : t.accent;
+            canvas.drawRect(barX, barY[i], barW, barH, color);
+            canvas.fillRect(barX, barY[i], (int)(v * barW), barH, color);
         }
     }
 
