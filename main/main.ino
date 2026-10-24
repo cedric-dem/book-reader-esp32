@@ -228,7 +228,7 @@ void drawMenu() {
     canvas.setTextColor(t.fg, t.bg);
 
     canvas.setCursor(10, 10);
-    canvas.println("=== SPEED READER ===");
+    canvas.println("== MAIN MENU ==");
 
     const char* items[3] = {"1. Books List", "2. Options", "3. Language"};
     for (int i = 0; i < 3; i++) {
