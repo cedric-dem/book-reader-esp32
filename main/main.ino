@@ -530,17 +530,21 @@ void drawReading() {
 
     // Draw Status / Progress Bars (if Focus Mode is off)
     if (!focusMode) {
-        // Top progress bar (Chapter / Book progress)
-        canvas.drawRect(10, 5, 220, 6, t.accent);
-        int progressWidth = (int)((float)currentWordIndex / total * 220);
-        canvas.fillRect(10, 5, progressWidth, 6, t.accent);
+        // 5 progress bars: 3 above the word, 2 below it.
+        // Each one currently shows book progress; change the matching entry
+        // in barValues (0.0 to 1.0) to make a bar track something else.
+        const int barX = 10, barW = 220, barH = 6;
+        const int barY[5] = {5, 17, 29,   // above the word (word sits at y=60..76)
+                             112, 124};   // below the word
+        float bookProgress = (float)currentWordIndex / total;
+        float barValues[5] = {bookProgress, bookProgress, bookProgress,
+                              bookProgress, bookProgress};
 
-        // Speed and status indicators at the bottom
-        canvas.setTextSize(1);
-        canvas.setCursor(10, 120);
-        canvas.setTextColor(t.accent, t.bg);
-        canvas.printf("Speed: %.0f%% | Word %d/%d", speeds[speedMultiplierIdx] * 100, currentWordIndex + 1, total);
-        canvas.setTextSize(2);
+        for (int i = 0; i < 5; i++) {
+            float v = constrain(barValues[i], 0.0f, 1.0f);
+            canvas.drawRect(barX, barY[i], barW, barH, t.accent);
+            canvas.fillRect(barX, barY[i], (int)(v * barW), barH, t.accent);
+        }
     }
 
     // Draw Current Word precisely in the center of the screen
