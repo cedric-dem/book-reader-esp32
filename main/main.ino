@@ -39,6 +39,46 @@ AppState currentState = STATE_MENU;
 int menuSelection = 0;
 const int menuMaxItems = 3;
 
+// --- DISPLAY BUFFER ---
+// Everything is drawn into this off-screen canvas, then pushed to the LCD in
+// one go. This avoids the flicker caused by fillScreen() hitting the panel
+// directly before the text is redrawn.
+M5Canvas canvas(&M5.Display);
+
+// --- EXTERNAL BUTTONS ---
+// Only pins exposed on the M5StickC Plus2 connectors are used here.
+// GPIO 12/15 are the LCD's reset/data lines, 21 is the internal I2C bus,
+// and 20/23 are not broken out, so they must not be used as buttons.
+// Wire each button between the pin and GND (internal pull-ups are enabled).
+// Set a pin to -1 to disable that button.
+// Note: G0 is a boot pin - don't hold that button while powering on.
+// Note: G25 and G36 share the same header pin, so only G25 is used.
+const int PIN_BTN_BACK     = 26; // Back to menu
+const int PIN_BTN_FASTER   = 32; // Faster (+10%)
+const int PIN_BTN_SLOWER   = 33; // Slower (-10%)
+const int PIN_BTN_FOCUS    = 25; // Focus mode toggle
+const int PIN_BTN_BACK10   = 0;  // Back 10 words
+const int PIN_BTN_FWD10    = -1; // Forward 10 words (no free pin left - assign one if you free up another)
+
+const int extPins[] = {PIN_BTN_BACK, PIN_BTN_FASTER, PIN_BTN_SLOWER, PIN_BTN_FOCUS, PIN_BTN_BACK10, PIN_BTN_FWD10};
+const int extPinCount = sizeof(extPins) / sizeof(extPins[0]);
+bool extPrevPressed[extPinCount] = {false};
+unsigned long extLastChange[extPinCount] = {0};
+
+// Returns true once per press (falling edge, debounced), without blocking.
+bool extPressed(int idx) {
+    int pin = extPins[idx];
+    if (pin < 0) return false;
+    bool pressed = digitalRead(pin) == LOW;
+    bool fired = false;
+    if (pressed != extPrevPressed[idx] && millis() - extLastChange[idx] > 40) {
+        extLastChange[idx] = millis();
+        extPrevPressed[idx] = pressed;
+        fired = pressed;
+    }
+    return fired;
+}
+
 // --- HARDCODED SAMPLE BOOK & READING ENGINE ---
 std::vector<std::string> sampleWords = {
     "Welcome", "to", "your", "M5StickC", "Plus", "2", "speed", "reader.",
@@ -69,11 +109,20 @@ unsigned long calculateWordDelay(std::string word);
 void setup() {
     auto cfg = M5.config();
     M5.begin(cfg);
-    
+
     // Configure display orientation (Horizontal landscape fits M5StickC Plus 2 well for RSVP)
-    M5.Lcd.setRotation(1); 
-    M5.Lcd.setTextSize(2);
-    
+    M5.Display.setRotation(1);
+
+    // Off-screen buffer the size of the display (240x135 in landscape, ~65 KB)
+    canvas.setColorDepth(16);
+    canvas.createSprite(M5.Display.width(), M5.Display.height());
+    canvas.setTextSize(2);
+
+    // External buttons: pin -> button -> GND
+    for (int i = 0; i < extPinCount; i++) {
+        if (extPins[i] >= 0) pinMode(extPins[i], INPUT_PULLUP);
+    }
+
     // Initialize buttons & state
     currentWordIndex = 0;
     isPlaying = false;
@@ -98,7 +147,10 @@ void loop() {
             drawReading();
             break;
     }
-    
+
+    // Send the finished frame to the display in one go
+    canvas.pushSprite(0, 0);
+
     delay(30); // Prevent CPU thrashing
 }
 
@@ -108,7 +160,7 @@ void handleInput() {
     // BtnA (Main face button below screen) -> Next / Down
     // BtnB (Side power/home style or lower button depending on model) -> Select / Action
     // BtnPWR -> Back / Return
-    
+
     if (M5.BtnA.wasClicked()) {
         if (currentState == STATE_MENU) {
             menuSelection = (menuSelection + 1) % menuMaxItems;
@@ -147,115 +199,97 @@ void handleInput() {
         }
     }
 
-    // Map external/mapped inputs if wired per your GPIO specs
-    // Pin 26 (Top Right): Back / Save progress
-    if (digitalRead(26) == LOW) {
+    // External buttons (non-blocking, one action per press)
+    if (extPressed(0)) { // Back / Save progress
         currentState = STATE_MENU;
         isPlaying = false;
-        delay(200); // Debounce
     }
-    // Pin 15 (Right Top): Faster (+10%)
-    if (digitalRead(15) == LOW) {
+    if (extPressed(1)) { // Faster (+10%)
         if (currentState == STATE_READING && speedMultiplierIdx < 10) speedMultiplierIdx++;
-        delay(150);
     }
-    // Pin 20 (Right Down): Slower (-10%)
-    if (digitalRead(20) == LOW) {
+    if (extPressed(2)) { // Slower (-10%)
         if (currentState == STATE_READING && speedMultiplierIdx > 0) speedMultiplierIdx--;
-        delay(150);
     }
-    // Pin 23 (Left Square): Focus mode toggle (hide/show bars)
-    if (digitalRead(23) == LOW) {
-        if (currentState == STATE_READING) {
-            focusMode = !focusMode;
-        }
-        delay(200);
+    if (extPressed(3)) { // Focus mode toggle (hide/show bars)
+        if (currentState == STATE_READING) focusMode = !focusMode;
     }
-    // Pin 12 (Right Left): Back 10 words
-    if (digitalRead(12) == LOW) {
-        if (currentState == STATE_READING) {
-            currentWordIndex = max(0, currentWordIndex - 10);
-        }
-        delay(150);
+    if (extPressed(4)) { // Back 10 words
+        if (currentState == STATE_READING) currentWordIndex = max(0, currentWordIndex - 10);
     }
-    // Pin 21 (Right Right): Forward 10 words
-    if (digitalRead(21) == LOW) {
-        if (currentState == STATE_READING) {
-            currentWordIndex = min((int)sampleWords.size() - 1, currentWordIndex + 10);
-        }
-        delay(150);
+    if (extPressed(5)) { // Forward 10 words
+        if (currentState == STATE_READING) currentWordIndex = min((int)sampleWords.size() - 1, currentWordIndex + 10);
     }
 }
 
 // --- RENDER SCREENS ---
 void drawMenu() {
     Theme t = themes[currentThemeIndex];
-    M5.Lcd.fillScreen(t.bg);
-    M5.Lcd.setTextColor(t.fg, t.bg);
-    
-    M5.Lcd.setCursor(10, 10);
-    M5.Lcd.println("=== SPEED READER ===");
-    
+    canvas.fillScreen(t.bg);
+    canvas.setTextColor(t.fg, t.bg);
+
+    canvas.setCursor(10, 10);
+    canvas.println("=== SPEED READER ===");
+
     const char* items[3] = {"1. Books List", "2. Options", "3. Language"};
     for (int i = 0; i < 3; i++) {
-        M5.Lcd.setCursor(20, 45 + (i * 25));
+        canvas.setCursor(20, 45 + (i * 25));
         if (i == menuSelection) {
-            M5.Lcd.setTextColor(t.accent, t.bg);
-            M5.Lcd.print("> ");
+            canvas.setTextColor(t.accent, t.bg);
+            canvas.print("> ");
         } else {
-            M5.Lcd.setTextColor(t.fg, t.bg);
-            M5.Lcd.print("  ");
+            canvas.setTextColor(t.fg, t.bg);
+            canvas.print("  ");
         }
-        M5.Lcd.println(items[i]);
+        canvas.println(items[i]);
     }
 }
 
 void drawBooksList() {
     Theme t = themes[currentThemeIndex];
-    M5.Lcd.fillScreen(t.bg);
-    M5.Lcd.setTextColor(t.fg, t.bg);
-    
-    M5.Lcd.setCursor(10, 10);
-    M5.Lcd.println("Books : 1 (Sample)");
-    
-    M5.Lcd.setCursor(20, 50);
-    M5.Lcd.setTextColor(t.accent, t.bg);
-    M5.Lcd.println("> Sample_Novel.epub");
-    
-    M5.Lcd.setTextColor(t.fg, t.bg);
-    M5.Lcd.setCursor(10, 200);
-    M5.Lcd.setTextSize(1);
-    M5.Lcd.println("Press BtnA/BtnB to select. PWR to back.");
-    M5.Lcd.setTextSize(2);
+    canvas.fillScreen(t.bg);
+    canvas.setTextColor(t.fg, t.bg);
+
+    canvas.setCursor(10, 10);
+    canvas.println("Books : 1 (Sample)");
+
+    canvas.setCursor(20, 50);
+    canvas.setTextColor(t.accent, t.bg);
+    canvas.println("> Sample_Novel.epub");
+
+    canvas.setTextColor(t.fg, t.bg);
+    canvas.setCursor(10, 122);
+    canvas.setTextSize(1);
+    canvas.println("Press BtnA/BtnB to select. PWR to back.");
+    canvas.setTextSize(2);
 }
 
 void drawOptions() {
     Theme t = themes[currentThemeIndex];
-    M5.Lcd.fillScreen(t.bg);
-    M5.Lcd.setTextColor(t.fg, t.bg);
-    
-    M5.Lcd.setCursor(10, 10);
-    M5.Lcd.println("OPTIONS");
-    
-    M5.Lcd.setCursor(10, 50);
-    M5.Lcd.printf("Theme: %s\n", t.name);
-    
-    M5.Lcd.setCursor(10, 80);
-    M5.Lcd.printf("Lang: %s\n", currentLang == LANG_EN ? "EN" : (currentLang == LANG_FR ? "FR" : "ES"));
+    canvas.fillScreen(t.bg);
+    canvas.setTextColor(t.fg, t.bg);
 
-    M5.Lcd.setCursor(10, 200);
-    M5.Lcd.setTextSize(1);
-    M5.Lcd.println("BtnA: Next Theme | BtnB: Lang");
-    M5.Lcd.setTextSize(2);
+    canvas.setCursor(10, 10);
+    canvas.println("OPTIONS");
+
+    canvas.setCursor(10, 50);
+    canvas.printf("Theme: %s\n", t.name);
+
+    canvas.setCursor(10, 80);
+    canvas.printf("Lang: %s\n", currentLang == LANG_EN ? "EN" : (currentLang == LANG_FR ? "FR" : "ES"));
+
+    canvas.setCursor(10, 122);
+    canvas.setTextSize(1);
+    canvas.println("BtnA: Next Theme | BtnB: Lang");
+    canvas.setTextSize(2);
 }
 
 unsigned long calculateWordDelay(std::string word) {
     float baseDelay = (60.0f / baseWPM) * 1000.0f; // ms per word
     float currentSpeedMult = speeds[speedMultiplierIdx];
-    
+
     // Length factor: longer words stay slightly longer
     float lengthFactor = 1.0f + (max(0, (int)word.length() - 5) * 0.05f);
-    
+
     // Punctuation multipliers
     float punctFactor = 1.0f;
     if (!word.empty()) {
@@ -263,14 +297,14 @@ unsigned long calculateWordDelay(std::string word) {
         if (lastChar == '.') punctFactor = 2.0f;
         else if (lastChar == ',' || lastChar == ';' || lastChar == ':') punctFactor = 1.5f;
     }
-    
+
     return (unsigned long)(baseDelay * lengthFactor * punctFactor / currentSpeedMult);
 }
 
 void drawReading() {
     Theme t = themes[currentThemeIndex];
-    M5.Lcd.fillScreen(t.bg);
-    
+    canvas.fillScreen(t.bg);
+
     // Handle word pacing logic
     if (isPlaying && (millis() - lastWordTime > calculateWordDelay(sampleWords[currentWordIndex]))) {
         currentWordIndex++;
@@ -284,27 +318,27 @@ void drawReading() {
     // Draw Status / Progress Bars (if Focus Mode is off)
     if (!focusMode) {
         // Top progress bar (Chapter / Book progress)
-        M5.Lcd.drawRect(10, 5, 220, 6, t.accent);
+        canvas.drawRect(10, 5, 220, 6, t.accent);
         int progressWidth = (int)((float)currentWordIndex / sampleWords.size() * 220);
-        M5.Lcd.fillRect(10, 5, progressWidth, 6, t.accent);
+        canvas.fillRect(10, 5, progressWidth, 6, t.accent);
 
         // Speed and status indicators at the bottom
-        M5.Lcd.setTextSize(1);
-        M5.Lcd.setCursor(10, 120);
-        M5.Lcd.setTextColor(t.accent, t.bg);
-        M5.Lcd.printf("Speed: %.0f%% | Word %d/%d", speeds[speedMultiplierIdx] * 100, currentWordIndex + 1, sampleWords.size());
-        M5.Lcd.setTextSize(2);
+        canvas.setTextSize(1);
+        canvas.setCursor(10, 120);
+        canvas.setTextColor(t.accent, t.bg);
+        canvas.printf("Speed: %.0f%% | Word %d/%d", speeds[speedMultiplierIdx] * 100, currentWordIndex + 1, (int)sampleWords.size());
+        canvas.setTextSize(2);
     }
 
     // Draw Current Word precisely in the center of the screen
-    M5.Lcd.setTextColor(t.fg, t.bg);
+    canvas.setTextColor(t.fg, t.bg);
     std::string currentWord = sampleWords[currentWordIndex];
-    
+
     // Calculate string width for centering on 240x135 landscape display
-    int textWidth = currentWord.length() * 12; // Approximate width for font size 2
+    int textWidth = canvas.textWidth(currentWord.c_str());
     int centerX = max(5, (240 - textWidth) / 2);
     int centerY = 60;
-    
-    M5.Lcd.setCursor(centerX, centerY);
-    M5.Lcd.print(currentWord.c_str());
+
+    canvas.setCursor(centerX, centerY);
+    canvas.print(currentWord.c_str());
 }
