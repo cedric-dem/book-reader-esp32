@@ -230,7 +230,7 @@ void drawMenu() {
     canvas.setCursor(10, 10);
     canvas.println("== MAIN MENU ==");
 
-    const char* items[3] = {"1. Books List", "2. Options", "3. Language"};
+    const char* items[3] = {"1. Books List", "2. Options"};
     for (int i = 0; i < 3; i++) {
         canvas.setCursor(20, 45 + (i * 25));
         if (i == menuSelection) {
