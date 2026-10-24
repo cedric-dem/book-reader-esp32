@@ -1,4 +1,5 @@
 #include <M5Unified.h>
+#include <LittleFS.h>
 #include <vector>
 #include <string>
 
@@ -90,6 +91,141 @@ std::vector<std::string> sampleWords = {
     "Use", "the", "side", "buttons", "to", "change", "speed,", "pause,", "or", "skip", "words."
 };
 
+// --- TEXT FILE BOOKS (LittleFS) ---
+// .txt files placed in the sketch's "data" folder are uploaded to the internal
+// flash with the LittleFS upload tool and show up in the Books list.
+// Books are not loaded into RAM: an index pass stores the byte offset of every
+// CHUNK_WORDS-th word, and words are then read from the file one chunk at a time.
+const int CHUNK_WORDS = 64;
+const size_t MAX_WORD_LEN = 48;     // Longer "words" are truncated
+const int MAX_BOOKS = 30;
+
+bool fsReady = false;
+std::vector<std::string> bookFiles; // Full paths of .txt files found
+int bookSelection = 0;              // Selected entry in the Books list
+int openedBookIdx = -2;             // Entry currently loaded (-2 = none)
+std::string listMessage = "";       // Error/status line on the Books screen
+
+bool readingFromFile = false;       // false = built-in sample book
+File bookFile;
+std::vector<uint32_t> chunkOffsets; // Byte offset of the first word of each chunk
+int fileWordCount = 0;
+std::vector<std::string> chunkWords;
+int loadedChunk = -1;
+
+static inline bool isSeparator(char c) {
+    return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f' || c == '\v';
+}
+
+static bool endsWithTxt(const std::string& s) {
+    if (s.size() < 4) return false;
+    std::string ext = s.substr(s.size() - 4);
+    for (auto& ch : ext) ch = tolower(ch);
+    return ext == ".txt";
+}
+
+// Find every .txt file in the root of the filesystem
+void scanBooks() {
+    bookFiles.clear();
+    if (!fsReady) return;
+    File root = LittleFS.open("/");
+    if (!root || !root.isDirectory()) return;
+    File f = root.openNextFile();
+    while (f && (int)bookFiles.size() < MAX_BOOKS) {
+        if (!f.isDirectory()) {
+            std::string path = f.path();
+            if (endsWithTxt(path)) bookFiles.push_back(path);
+        }
+        f = root.openNextFile();
+    }
+}
+
+// Opens a .txt file and builds the chunk index. Returns false if the file
+// can't be opened or contains no words.
+bool openBook(const std::string& path) {
+    if (bookFile) bookFile.close();
+    chunkOffsets.clear();
+    chunkWords.clear();
+    fileWordCount = 0;
+    loadedChunk = -1;
+
+    bookFile = LittleFS.open(path.c_str(), "r");
+    if (!bookFile) return false;
+
+    uint8_t buf[512];
+    uint32_t pos = 0;
+    bool inWord = false;
+    int n;
+    while ((n = bookFile.read(buf, sizeof(buf))) > 0) {
+        for (int i = 0; i < n; i++, pos++) {
+            if (isSeparator(buf[i])) {
+                inWord = false;
+            } else if (!inWord) {
+                if (fileWordCount % CHUNK_WORDS == 0) chunkOffsets.push_back(pos);
+                fileWordCount++;
+                inWord = true;
+            }
+        }
+    }
+    if (fileWordCount == 0) {
+        bookFile.close();
+        return false;
+    }
+    return true;
+}
+
+// Reads the words of chunk `c` from the open file into chunkWords
+void loadChunk(int c) {
+    chunkWords.clear();
+    loadedChunk = c;
+    if (c < 0 || c >= (int)chunkOffsets.size()) return;
+    bookFile.seek(chunkOffsets[c]);
+
+    std::string w;
+    uint8_t buf[256];
+    int n;
+    while ((int)chunkWords.size() < CHUNK_WORDS && (n = bookFile.read(buf, sizeof(buf))) > 0) {
+        for (int i = 0; i < n && (int)chunkWords.size() < CHUNK_WORDS; i++) {
+            char ch = (char)buf[i];
+            if (isSeparator(ch)) {
+                if (!w.empty()) { chunkWords.push_back(w); w.clear(); }
+            } else if (w.size() < MAX_WORD_LEN) {
+                w += ch;
+            }
+        }
+    }
+    if (!w.empty() && (int)chunkWords.size() < CHUNK_WORDS) chunkWords.push_back(w);
+
+    // Strip a UTF-8 byte order mark from the very first word
+    if (c == 0 && !chunkWords.empty() && chunkWords[0].compare(0, 3, "\xEF\xBB\xBF") == 0) {
+        chunkWords[0].erase(0, 3);
+    }
+}
+
+int wordCount() {
+    return readingFromFile ? fileWordCount : (int)sampleWords.size();
+}
+
+std::string getWord(int i) {
+    if (!readingFromFile) {
+        return (i >= 0 && i < (int)sampleWords.size()) ? sampleWords[i] : "";
+    }
+    if (i < 0 || i >= fileWordCount) return "";
+    int c = i / CHUNK_WORDS;
+    if (c != loadedChunk) loadChunk(c);
+    int idx = i % CHUNK_WORDS;
+    return idx < (int)chunkWords.size() ? chunkWords[idx] : "";
+}
+
+// Display name: "/my_book.txt" -> "my_book"
+std::string bookTitle(const std::string& path) {
+    std::string name = path;
+    size_t slash = name.find_last_of('/');
+    if (slash != std::string::npos) name = name.substr(slash + 1);
+    if (endsWithTxt(name)) name = name.substr(0, name.size() - 4);
+    return name;
+}
+
 int currentWordIndex = 0;
 bool isPlaying = false;
 int baseWPM = 300;         // Words per minute baseline
@@ -104,6 +240,7 @@ void drawBooksList();
 void drawOptions();
 void drawReading();
 void handleInput();
+void openSelectedBook();
 unsigned long calculateWordDelay(std::string word);
 
 void setup() {
@@ -122,6 +259,10 @@ void setup() {
     for (int i = 0; i < extPinCount; i++) {
         if (extPins[i] >= 0) pinMode(extPins[i], INPUT_PULLUP);
     }
+
+    // Internal flash filesystem holding the .txt books (formatted on first use)
+    fsReady = LittleFS.begin(true);
+    scanBooks();
 
     // Initialize buttons & state
     currentWordIndex = 0;
@@ -165,8 +306,9 @@ void handleInput() {
         if (currentState == STATE_MENU) {
             menuSelection = (menuSelection + 1) % menuMaxItems;
         } else if (currentState == STATE_BOOKS_LIST) {
-            currentState = STATE_READING;
-            isPlaying = true;
+            // Next book (the built-in sample is the last entry)
+            bookSelection = (bookSelection + 1) % ((int)bookFiles.size() + 1);
+            listMessage = "";
         } else if (currentState == STATE_OPTIONS) {
             currentThemeIndex = (currentThemeIndex + 1) % 8;
         } else if (currentState == STATE_READING) {
@@ -177,12 +319,19 @@ void handleInput() {
 
     if (M5.BtnB.wasClicked()) {
         if (currentState == STATE_MENU) {
-            if (menuSelection == 0) currentState = STATE_BOOKS_LIST;
+            if (menuSelection == 0) {
+                scanBooks();
+                if (bookSelection > (int)bookFiles.size()) bookSelection = 0;
+                listMessage = "";
+                currentState = STATE_BOOKS_LIST;
+            }
             else if (menuSelection == 1) currentState = STATE_OPTIONS;
             else if (menuSelection == 2) {
                 // Toggle Language
                 currentLang = (Lang)((currentLang + 1) % 3);
             }
+        } else if (currentState == STATE_BOOKS_LIST) {
+            openSelectedBook();
         } else if (currentState == STATE_OPTIONS) {
             currentLang = (Lang)((currentLang + 1) % 3);
         } else if (currentState == STATE_READING) {
@@ -217,8 +366,44 @@ void handleInput() {
         if (currentState == STATE_READING) currentWordIndex = max(0, currentWordIndex - 10);
     }
     if (extPressed(5)) { // Forward 10 words
-        if (currentState == STATE_READING) currentWordIndex = min((int)sampleWords.size() - 1, currentWordIndex + 10);
+        if (currentState == STATE_READING) currentWordIndex = min(wordCount() - 1, currentWordIndex + 10);
     }
+}
+
+// Opens the book selected in the Books list and starts reading.
+// Re-opening the book you were already reading resumes where you left off.
+void openSelectedBook() {
+    bool isSample = bookSelection >= (int)bookFiles.size();
+
+    if (bookSelection != openedBookIdx) {
+        if (isSample) {
+            if (bookFile) bookFile.close();
+            readingFromFile = false;
+        } else {
+            // Indexing a large file takes a moment, so say so
+            Theme t = themes[currentThemeIndex];
+            canvas.fillScreen(t.bg);
+            canvas.setTextColor(t.fg, t.bg);
+            canvas.setCursor(10, 55);
+            canvas.println("Loading...");
+            canvas.pushSprite(0, 0);
+
+            if (!openBook(bookFiles[bookSelection])) {
+                readingFromFile = false;
+                openedBookIdx = -2;
+                listMessage = "Can't read file / empty";
+                return;
+            }
+            readingFromFile = true;
+        }
+        openedBookIdx = bookSelection;
+        currentWordIndex = 0;
+    }
+
+    listMessage = "";
+    currentState = STATE_READING;
+    isPlaying = true;
+    lastWordTime = millis();
 }
 
 // --- RENDER SCREENS ---
@@ -249,17 +434,41 @@ void drawBooksList() {
     canvas.fillScreen(t.bg);
     canvas.setTextColor(t.fg, t.bg);
 
-    canvas.setCursor(10, 10);
-    canvas.println("Books : 1 (Sample)");
+    int total = (int)bookFiles.size() + 1; // + built-in sample
 
-    canvas.setCursor(20, 50);
-    canvas.setTextColor(t.accent, t.bg);
-    canvas.println("> Sample_Novel.epub");
+    canvas.setCursor(10, 8);
+    canvas.printf("Books: %d", total);
 
-    canvas.setTextColor(t.fg, t.bg);
-    canvas.setCursor(10, 122);
+    // Scrolling window of up to 4 entries around the selection
+    const int visible = 4;
+    int first = max(0, min(bookSelection - visible + 1, total - visible));
+    first = max(0, min(first, bookSelection));
+    for (int i = first; i < min(total, first + visible); i++) {
+        std::string name = (i < (int)bookFiles.size()) ? bookTitle(bookFiles[i]) : "Sample (built-in)";
+        if (name.size() > 17) name = name.substr(0, 16) + "~";
+
+        canvas.setCursor(10, 32 + (i - first) * 20);
+        if (i == bookSelection) {
+            canvas.setTextColor(t.accent, t.bg);
+            canvas.print("> ");
+        } else {
+            canvas.setTextColor(t.fg, t.bg);
+            canvas.print("  ");
+        }
+        canvas.print(name.c_str());
+    }
+
     canvas.setTextSize(1);
-    canvas.println("Press BtnA/BtnB to select. PWR to back.");
+    canvas.setTextColor(t.fg, t.bg);
+    if (!fsReady) {
+        canvas.setCursor(10, 112);
+        canvas.print("Storage not available");
+    } else if (!listMessage.empty()) {
+        canvas.setCursor(10, 112);
+        canvas.print(listMessage.c_str());
+    }
+    canvas.setCursor(10, 124);
+    canvas.print("BtnA: next | BtnB: open | PWR: back");
     canvas.setTextSize(2);
 }
 
@@ -305,12 +514,16 @@ void drawReading() {
     Theme t = themes[currentThemeIndex];
     canvas.fillScreen(t.bg);
 
+    int total = wordCount();
+    if (total == 0) return;
+    if (currentWordIndex >= total) currentWordIndex = total - 1;
+
     // Handle word pacing logic
-    if (isPlaying && (millis() - lastWordTime > calculateWordDelay(sampleWords[currentWordIndex]))) {
+    if (isPlaying && (millis() - lastWordTime > calculateWordDelay(getWord(currentWordIndex)))) {
         currentWordIndex++;
-        if (currentWordIndex >= sampleWords.size()) {
+        if (currentWordIndex >= total) {
             currentWordIndex = 0;
-            isPlaying = false; // Stop at end of sample book
+            isPlaying = false; // Stop at end of book
         }
         lastWordTime = millis();
     }
@@ -319,20 +532,20 @@ void drawReading() {
     if (!focusMode) {
         // Top progress bar (Chapter / Book progress)
         canvas.drawRect(10, 5, 220, 6, t.accent);
-        int progressWidth = (int)((float)currentWordIndex / sampleWords.size() * 220);
+        int progressWidth = (int)((float)currentWordIndex / total * 220);
         canvas.fillRect(10, 5, progressWidth, 6, t.accent);
 
         // Speed and status indicators at the bottom
         canvas.setTextSize(1);
         canvas.setCursor(10, 120);
         canvas.setTextColor(t.accent, t.bg);
-        canvas.printf("Speed: %.0f%% | Word %d/%d", speeds[speedMultiplierIdx] * 100, currentWordIndex + 1, (int)sampleWords.size());
+        canvas.printf("Speed: %.0f%% | Word %d/%d", speeds[speedMultiplierIdx] * 100, currentWordIndex + 1, total);
         canvas.setTextSize(2);
     }
 
     // Draw Current Word precisely in the center of the screen
     canvas.setTextColor(t.fg, t.bg);
-    std::string currentWord = sampleWords[currentWordIndex];
+    std::string currentWord = getWord(currentWordIndex);
 
     // Calculate string width for centering on 240x135 landscape display
     int textWidth = canvas.textWidth(currentWord.c_str());
