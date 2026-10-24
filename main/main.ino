@@ -549,7 +549,16 @@ void drawReading() {
         // Bars 0-3 show book progress; the bottom bar (4) is the battery level.
         // Change the matching entry in barValues (0.0 to 1.0) to make a bar
         // track something else.
-        const int barX = 10, barW = 220, barH = 6;
+        //
+        // Layout: each row is split in two halves. The left half holds the
+        // row's label / indicator (small font, 6x8 px per char), the right
+        // half holds the bar. Only the battery row has a label for now.
+        const int screenW = canvas.width();           // 240 in landscape
+        const int margin  = 10;                       // left/right screen margin
+        const int labelX  = margin;                   // left half: label column
+        const int barX    = screenW / 2;              // right half starts at 50%
+        const int barW    = screenW - barX - margin;  // right half, minus margin
+        const int barH    = 6;
         const int barY[5] = {5, 17, 29,   // above the word (word sits at y=60..76)
                              112, 124};   // below the word
         float bookProgress = (float)currentWordIndex / total;
@@ -557,28 +566,29 @@ void drawReading() {
         float barValues[5] = {bookProgress, bookProgress, bookProgress,
                               bookProgress, batteryLevel};
 
-        // The battery bar (4) is shortened to make room for its
-        // "Battery : xx%" label on the left (small font, 6x8 px per char).
-        const int battLabelW = 90;   // fits "Battery : 100%" (14 chars * 6 px) + gap
-
         for (int i = 0; i < 5; i++) {
             float v = constrain(barValues[i], 0.0f, 1.0f);
             // Battery bar turns red when it drops to 20% or below
             uint32_t color = (i == 4 && v <= 0.2f) ? TFT_RED : t.accent;
-            int x = barX, w = barW;
+
+            // Label / indicator in the left half
+            const char* label = nullptr;
+            char buf[20];
             if (i == 4) {
-                char label[20];
-                snprintf(label, sizeof(label), "Battery : %d%%", (int)(v * 100.0f + 0.5f));
+                snprintf(buf, sizeof(buf), "Battery : %d%%", (int)(v * 100.0f + 0.5f));
+                label = buf;
+            }
+            if (label) {
                 canvas.setTextSize(1);
                 canvas.setTextColor(color, t.bg);
-                canvas.setCursor(barX, barY[i] - 1);   // 8 px text centred on the 6 px bar
+                canvas.setCursor(labelX, barY[i] - 1);  // 8 px text centred on the 6 px bar
                 canvas.print(label);
-                canvas.setTextSize(2);                 // restore the word font size
-                x = barX + battLabelW;
-                w = barW - battLabelW;
+                canvas.setTextSize(2);                  // restore the word font size
             }
-            canvas.drawRect(x, barY[i], w, barH, color);
-            canvas.fillRect(x, barY[i], (int)(v * w), barH, color);
+
+            // Bar in the right half
+            canvas.drawRect(barX, barY[i], barW, barH, color);
+            canvas.fillRect(barX, barY[i], (int)(v * barW), barH, color);
         }
     }
 
