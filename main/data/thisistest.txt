@@ -1,3 +1,0 @@
-This is an example book loaded from a text file. Any .txt file you put in the data folder of the sketch is uploaded to the internal flash of the M5StickC Plus2 and appears in the Books list.
-
-Words are separated by spaces, tabs and line breaks. Punctuation stays attached to the word, so commas, colons and periods still add their pause. Replace this file with your own books, upload them, and enjoy reading.
